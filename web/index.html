@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IdealChat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- R3: choose a unique name to enter the chat -->
+  <section id="login" class="card">
+    <h1>IdealChat</h1>
+    <form id="login-form" autocomplete="off">
+      <label for="name">Your name</label>
+      <input id="name" maxlength="30" placeholder="e.g. alice" autofocus>
+      <button type="submit">Connect</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <main id="app" hidden>
+    <aside>
+      <header>IdealChat<span id="me"></span></header>
+
+      <!-- R4: all connected clients, including yourself -->
+      <h2>Online users</h2>
+      <ul id="user-list"></ul>
+
+      <!-- R9: all groups with their members; R10: join a group yourself -->
+      <h2>Groups</h2>
+      <ul id="group-list"></ul>
+
+      <!-- R8: create a group (you become its only member) -->
+      <form id="create-form" autocomplete="off">
+        <input id="group-name" maxlength="30" placeholder="New group name">
+        <button type="submit">Create</button>
+      </form>
+    </aside>
+
+    <!-- R5: every chat is its own room (tab); R6: each room has a chat window and a chat box -->
+    <section id="chat">
+      <nav id="tabs"></nav>
+      <div id="rooms">
+        <p id="placeholder">Select a user or a group to start chatting.</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+  <div id="offline" hidden>
+    <p>Lost connection to the server.</p>
+    <button type="button" id="reconnect">Reconnect</button>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

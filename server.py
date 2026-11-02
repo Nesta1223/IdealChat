@@ -1,15 +1,29 @@
-"""Chat server: raw TCP sockets, one thread per client."""
+"""IdealChat server: raw TCP sockets, one thread per connection.
+
+One port serves both the web page (plain HTTP) and the chat (WebSocket upgrade on /ws).
+"""
 import argparse
+import os
 import socket
 import threading
 import time
 
-from protocol import DEFAULT_PORT, recv_msg, send_msg
+from protocol import (DEFAULT_PORT, accept_websocket, is_websocket_upgrade, read_http_request,
+                      send_http)
+
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+# only these files are served (no path traversal possible)
+STATIC = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+}
+MAX_NAME = 30  # max length of a user name / group name
 
 lock = threading.Lock()
 # R3/R4: connected clients, keyed by their unique name
-clients = {}  # name -> socket
-send_locks = {}  # name -> Lock (serialises writes to one socket)
+clients = {}  # name -> WSConn
 # R8/R9/R10/R11: all chat groups and their members
 groups = {}  # group name -> list of member names (insertion order)
 # R9/R11: past messages of each group, replayed to a client when it joins that group
@@ -21,17 +35,15 @@ def log(*args):
     print(time.strftime("%H:%M:%S"), *args, flush=True)
 
 
-# R2: every message to a client goes out through its TCP socket (sendall in protocol.send_msg)
+# R2: every message to a client goes out through its TCP socket (WSConn.send writes WebSocket frames)
 def send_to(name, msg):
     """Send to one client by name; drop silently if it vanished."""
     with lock:
-        sock = clients.get(name)
-        slock = send_locks.get(name)
-    if sock is None:
+        conn = clients.get(name)
+    if conn is None:
         return
     try:
-        with slock:
-            send_msg(sock, msg)
+        conn.send(msg)
     except OSError:
         pass
 
@@ -59,26 +71,28 @@ def broadcast_groups():
         send_to(n, payload)
 
 
-def login(sock):
-    """Loop until the client picks a free name. Returns name or None."""
+def login(conn):
+    """Loop until the client picks a free name. Returns the name."""
     # R3: each client must have a unique name
     while True:
-        msg = recv_msg(sock)
+        msg = conn.recv()
         if msg.get("type") != "login":
-            send_msg(sock, {"type": "login_error", "reason": "Login required"})
+            conn.send({"type": "login_error", "reason": "Login required"})
             continue
         name = str(msg.get("name", "")).strip()
         if not name:
-            send_msg(sock, {"type": "login_error", "reason": "Name cannot be empty"})
+            conn.send({"type": "login_error", "reason": "Name cannot be empty"})
+            continue
+        if len(name) > MAX_NAME:
+            conn.send({"type": "login_error", "reason": f"Name is too long (max {MAX_NAME})"})
             continue
         # R3: reject a name already in use (case-insensitive); otherwise register it
         with lock:
             taken = any(n.lower() == name.lower() for n in clients)
             if not taken:
-                clients[name] = sock
-                send_locks[name] = threading.Lock()
+                clients[name] = conn
         if taken:
-            send_msg(sock, {"type": "login_error", "reason": f"Name '{name}' is already in use"})
+            conn.send({"type": "login_error", "reason": f"Name '{name}' is already in use"})
             continue
         send_to(name, {"type": "login_ok", "name": name})
         return name
@@ -104,9 +118,11 @@ def handle(name, msg):
 
     # R8: create a group; the creator is its only initial member
     elif t == "create_group":
-        g =str(msg.get("group", "")).strip()
+        g = str(msg.get("group", "")).strip()
         if not g:
             return send_to(name, {"type": "error", "text": "Group name cannot be empty"})
+        if len(g) > MAX_NAME:
+            return send_to(name, {"type": "error", "text": f"Group name is too long (max {MAX_NAME})"})
         with lock:
             exists = any(x.lower() == g.lower() for x in groups)
             if not exists:
@@ -123,7 +139,7 @@ def handle(name, msg):
 
     # R10: a client joins only by itself - the server adds the requester's own name, never anyone else
     elif t == "join_group":
-        g =msg.get("group")
+        g = msg.get("group")
         with lock:
             if g not in groups:
                 err = f"Group '{g}' does not exist"
@@ -158,10 +174,36 @@ def handle(name, msg):
             send_to(m, out)
 
 
+def serve_static(sock, method, path):
+    """Plain HTTP: hand out the web client (index.html, app.js, style.css)."""
+    if method != "GET":
+        return send_http(sock, 405, b"Method not allowed")
+    if path == "/favicon.ico":
+        return send_http(sock, 204)
+    entry = STATIC.get(path)
+    if entry is None:
+        return send_http(sock, 404, b"Not found")
+    filename, content_type = entry
+    try:
+        with open(os.path.join(WEB_DIR, filename), "rb") as f:
+            body = f.read()
+    except OSError:
+        return send_http(sock, 404, b"Not found")
+    send_http(sock, 200, body, content_type)
+
+
 def client_thread(sock, addr):
     name = None
+    conn = None
     try:
-        name = login(sock)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # notice dead peers
+        method, path, headers = read_http_request(sock)
+        if not is_websocket_upgrade(headers):
+            return serve_static(sock, method, path)
+        conn = accept_websocket(sock, headers)
+        if conn is None:
+            return
+        name = login(conn)
         log(f"{name} connected from {addr[0]}:{addr[1]}")
         # R4: tell everyone (including the new client) who is online
         broadcast_users()
@@ -169,29 +211,31 @@ def client_thread(sock, addr):
         send_to(name, {"type": "groups", "groups": groups_payload()})
         # R2: read client requests from the TCP socket
         while True:
-            msg = recv_msg(sock)
+            msg = conn.recv()
             try:
                 handle(name, msg)
             except (TypeError, AttributeError, KeyError):  # malformed request: reject, keep connection
                 send_to(name, {"type": "error", "text": "Malformed request"})
     except (OSError, ValueError):
-        pass  # disconnect or malformed frame
+        pass  # disconnect, malformed frame or bad HTTP request
     finally:
         if name:
             # R4/R9: on disconnect, drop the client from the online list and from every group
             with lock:
                 clients.pop(name, None)
-                send_locks.pop(name, None)
                 for members in groups.values():
                     if name in members:
                         members.remove(name)
             log(f"{name} disconnected")
             broadcast_users()
             broadcast_groups()
-        try:
-            sock.close()
-        except OSError:
-            pass
+        if conn:
+            conn.close()
+        else:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def main():
@@ -206,6 +250,7 @@ def main():
     srv.bind((args.host, args.port))
     srv.listen()
     log(f"IdealChat server listening on {args.host}:{args.port}")
+    log(f"Open http://localhost:{args.port} (or http://<this-computer-ip>:{args.port} from another computer)")
     try:
         # R1: accept clients from different computers; one thread serves each connection
         while True:
