@@ -61,6 +61,9 @@ function handle(m) {
       $("login").hidden = true;
       $("app").hidden = false;
       $("me").textContent = `signed in as ${me}`;
+      // keepalive: a tiny message every 25 s so a cloud proxy does not close an idle connection
+      // (the server ignores unknown message types)
+      setInterval(() => sendTyping({ type: "ping" }), 25000);
       break;
     case "login_error": // R3: name taken or invalid -> stay on the login screen
       $("login-error").textContent = m.reason;

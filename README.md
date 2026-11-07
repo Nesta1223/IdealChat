@@ -34,7 +34,18 @@ set GEMINI_API_KEY=your-key-here
 python server.py --port 5000
 ```
 
-Without a key the server still runs, but the bot answers "not configured". Cloud deployment: the key will be set on the VM the same way (to be added when we deploy).
+Without a key the server still runs, but the bot answers "not configured". On the cloud the key is set as an environment variable in the hosting dashboard (see below).
+
+### Deploy on Render (free, no credit card)
+Render runs `server.py` from this GitHub repo and gives it an HTTPS URL. The browser client switches to `wss://` by itself on HTTPS, so no code change is needed.
+
+1. Push the repo to GitHub (never commit the API key; `.gitignore` already excludes caches and `.env`).
+2. On https://render.com choose **New -> Web Service**, connect the GitHub repo.
+3. Settings: Runtime **Python 3**, Build command `echo ok` (nothing to install), Start command `python server.py --port $PORT`, Instance type **Free**.
+4. Under **Environment** add `GEMINI_API_KEY` = your key (optional: `GEMINI_MODEL`).
+5. After the deploy finishes, open the `https://<name>.onrender.com` URL on two different computers and chat.
+
+Free-tier notes: the service sleeps after 15 minutes without traffic and takes about 30-60 s to wake up, and users/groups/messages live in memory, so they are lost when it sleeps or restarts. Open the URL a few minutes before a demo. The browser sends a small `ping` message every 25 s so the connection is not closed as idle and counts as activity.
 
 ## Architecture (R1)
 ```
