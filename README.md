@@ -11,6 +11,31 @@ Then open `http://localhost:5000` in a browser (or `http://<server-ip>:5000` fro
 Cloud: open inbound TCP 5000 in the VM firewall/security group, then clients browse to `http://<public-ip>:5000`.
 LAN fallback: server's IPv4 from `ipconfig`; allow Python through Windows Firewall.
 
+### Gemini API key (AI chatbot)
+The AI feature calls the Google Gemini API, so **the computer that runs `server.py` must use its own API key**. The key is read from the `GEMINI_API_KEY` environment variable. Only the server computer needs it; the clients (browsers) never see it. Never write the key into the code or commit it to git. Get a free key at https://aistudio.google.com.
+
+Set the key and start the server **in the same terminal window** (the variable only lasts for that terminal):
+
+Mac / Linux (zsh or bash):
+```
+export GEMINI_API_KEY="your-key-here"
+python3 server.py --port 5000
+```
+
+Windows PowerShell:
+```
+$env:GEMINI_API_KEY = "your-key-here"
+python server.py --port 5000
+```
+
+Windows cmd:
+```
+set GEMINI_API_KEY=your-key-here
+python server.py --port 5000
+```
+
+Without a key the server still runs, but the bot answers "not configured". Cloud deployment: the key will be set on the VM the same way (to be added when we deploy).
+
 ## Architecture (R1)
 ```
  Browser A (PC 1) --TCP--+
@@ -39,8 +64,32 @@ Star topology: all messages go client -> server -> recipients. One port serves b
 | `group_msg` | C->S (`group`,`text`); S->C members only | | R11 |
 | `group_history` | S->C to the joiner only, right after `join_group` | group, messages[] (latest 500) | R9/R11 |
 | `error` | S->C | text | |
+| `edit_msg` | C->S | id, text (owner only) | bonus |
+| `delete_msg` | C->S | id (owner only) | bonus |
+| `react` | C->S | id, emoji (toggles our reaction) | bonus |
+| `msg_update` | S->C to everyone who can see the message | full message: id, kind, text, edited, deleted, reactions | bonus |
+| `typing` | C->S, relayed S->C to the other people in the chat | kind (`pm`/`group`), to / group, from, state | bonus |
+
+Every `pm` / `group_msg` now also carries `id`, `kind`, `edited`, `deleted`, `reactions`.
 
 ## Requirement map
 R1/R2: `server.py main()` (`socket/bind/listen/accept`), `protocol.py` (`recv/sendall` + WebSocket frames), `web/app.js connect()`. R3: `login()` in server.py, login form in `web/index.html`. R4: `broadcast_users`, `renderUsers`. R5/R6: `ensureRoom` in `web/app.js` (one tab per chat, each with a chat window + chat box). R7-R11: `handle()` in server.py, `renderGroups`/`ensureRoom` in `web/app.js`.
 
+Bonus features: server side in `handle()` in `server.py` (`edit_msg` / `delete_msg` / `react` / `typing`, helpers `new_record`, `snap`, `can_see`, `audience`); client side in `renderMsg`, `startEdit`, `showTyping` in `web/app.js`.
+
 Message text is always inserted into the page with `textContent` (never as HTML), so a message such as `<script>` is displayed literally.
+
+
+## Additional Requirement 
+1. Non-AI features :
+  - Typing indicator: a new typing message type, shown in the room as "bob is typing...".
+  - Emoji reactions on messages: allow user to add emoji reactions to message.
+  - Message edit/delete
+
+Reason of picking this 3 features is they're visible in a demo, and each one need new socket messages which fits the "socket programming" theme.
+
+2. AI feature: chatbot (Google Gemini), code in `bot.py` (`ask_gemini`) and `start_bot` / `bot_answer` in `server.py`.
+  - **Private chat with the bot:** click `Bot (AI)` in the online list; every message gets an answer, and the bot remembers the last 10 turns. Only the asker sees it.
+  - **In a group:** type `@bot <question>`; the answer is posted to the whole group. The bot is given the group's last 15 messages as context, so `@bot summarize this chat` works.
+  - The question and the answer travel as normal `pm` / `group_msg` messages over our own sockets (R2 is unchanged); only the server talks to Gemini (HTTPS REST, `urllib`). While waiting, the bot shows "Bot is typing..." using the typing indicator.
+  - Safety: the name `Bot` is reserved at login, one request per user every 3 s, at most 3 Gemini calls at once, errors (no key / busy / no network) are posted as a bot message instead of failing silently. Needs `GEMINI_API_KEY` on the server computer (see Run). The model can be changed with `GEMINI_MODEL`.
